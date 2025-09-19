@@ -24,7 +24,7 @@ jobs:
 
   linux-arm64-release:
     needs: [setup]
-    runs-on: ubuntu-24.04-arm64  # Novo runner ARM64 nativo
+    runs-on: ubuntu-24.04-arm  # Novo runner ARM64 nativo
     env:
       PACKAGENAME: mnn_${{ needs.setup.outputs.VERSION }}_linux_aarch64_cpu_opencl_tools
     steps:
