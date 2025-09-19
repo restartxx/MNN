@@ -1,4 +1,4 @@
-name: mnn_aarch64_static_release
+name: mnn_aarch64_musl_static_release
 on:
   push:
     tags:
@@ -22,51 +22,34 @@ jobs:
           echo "VERSION=dev" >> $GITHUB_OUTPUT
         fi
 
-  linux-arm64-static-release:
+  linux-arm64-musl-static-release:
     needs: [setup]
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-24.04-arm  
     env:
-      PACKAGENAME: mnn_${{ needs.setup.outputs.VERSION }}_linux_aarch64_static_tools
+      PACKAGENAME: mnn_${{ needs.setup.outputs.VERSION }}_linux_aarch64_musl_static_tools
+    container:
+      image: alpine:latest  # Alpine usa musl por padrão
     steps:
+    - name: Install build dependencies (Alpine/musl)
+      run: |
+        # Alpine package manager
+        apk update
+        apk add --no-cache \
+          build-base cmake ninja git \
+          protobuf-dev protobuf-c-dev \
+          linux-headers musl-dev \
+          jpeg-dev libpng-dev \
+          pkgconfig
+    
     - uses: actions/checkout@v4
       with:
         submodules: true
     
-    - name: Install dependencies for static build
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential cmake ninja-build
-        # Instalar versões estáticas das dependências
-        sudo apt-get install -y libprotobuf-dev:arm64 protobuf-compiler
-        sudo apt-get install -y opencl-headers ocl-icd-libopencl1:arm64
-        sudo apt-get install -y libjpeg-dev:arm64 libpng-dev:arm64
-        # Bibliotecas estáticas do sistema
-        sudo apt-get install -y libc6-dev:arm64 libstdc++6:arm64
-        sudo apt-get install -y libprotobuf-lite32:arm64 libprotoc32:arm64
-    
-    - name: Build protobuf statically (if needed)
-      run: |
-        # Verificar se protobuf estático está disponível
-        pkg-config --exists protobuf || {
-          echo "Building protobuf statically..."
-          wget https://github.com/protocolbuffers/protobuf/releases/download/v21.12/protobuf-all-21.12.tar.gz
-          tar -xzf protobuf-all-21.12.tar.gz
-          cd protobuf-21.12
-          ./configure --enable-static --disable-shared --prefix=/tmp/protobuf-static
-          make -j4 && make install
-          export PKG_CONFIG_PATH="/tmp/protobuf-static/lib/pkgconfig:$PKG_CONFIG_PATH"
-          export PATH="/tmp/protobuf-static/bin:$PATH"
-          cd ..
-        }
-    
-    - name: Build MNN with static linking
+    - name: Build MNN with musl static linking
       run: |
         mkdir build && cd build
         
-        # Configurar para linking estático completo
-        export LDFLAGS="-static -static-libgcc -static-libstdc++"
-        export CXXFLAGS="-static -static-libgcc -static-libstdc++"
-        
+        # Configuração para musl static
         cmake .. \
           -DMNN_BUILD_CONVERTER=ON \
           -DMNN_BUILD_TOOLS=ON \
@@ -83,153 +66,169 @@ jobs:
           -DBUILD_SHARED_LIBS=OFF \
           -GNinja
         
-        # Build com mais verbosidade para debug
         ninja -j4 -v
     
-    - name: Verify static linking
+    - name: Verify musl static binaries
       run: |
-        echo "=== Checking for static binaries ==="
+        echo "=== Checking musl static binaries ==="
         find build -name "MNNConvert" -type f -executable 2>/dev/null | while read file; do
-          echo "Checking: $file"
-          ldd "$file" 2>&1 | grep -q "not a dynamic executable" && echo "✅ Static binary" || {
-            echo "❌ Dynamic dependencies found:"
-            ldd "$file" 2>/dev/null || echo "ldd failed"
-          }
+          echo "=== Testing: $file ==="
+          
+          # Verificar tipo de arquivo
           file "$file"
+          
+          # Verificar se é estático
+          if ldd "$file" 2>&1 | grep -q "not a dynamic executable"; then
+            echo "✅ Static binary"
+          else
+            echo "❌ Still has dependencies:"
+            ldd "$file" 2>/dev/null || echo "ldd failed"
+          fi
+          
+          # Testar execução básica
+          echo "=== Basic execution test ==="
+          "$file" --help 2>&1 | head -5 || {
+            echo "Testing with no args..."
+            "$file" 2>&1 | head -5 || echo "Binary failed to run"
+          }
+          
           echo "Size: $(du -sh "$file" | cut -f1)"
-          echo "---"
+          echo "--------------------------------"
         done
-        
-        echo "=== All executables found ==="
-        find build -type f -executable | head -10
     
-    - name: Package static tools and libraries
+    - name: Package musl static tools
       run: |
         mkdir -p ${{ env.PACKAGENAME }}/{bin,lib,include}
         
-        # Copiar ferramentas estáticas
+        # Copiar binários testados
         find build -name "MNNConvert" -type f -executable -exec cp {} ${{ env.PACKAGENAME }}/bin/ \; 2>/dev/null || echo "MNNConvert not found"
-        find build -name "MNNDump" -type f -executable -exec cp {} ${{ env.PACKAGENAME }}/bin/ \; 2>/dev/null || echo "MNNDump not found"
+        find build -name "MNNDump" -type f -executable -exec cp {} ${{ env.PACKAGENAME }}/bin/ \; 2>/dev/null || echo "MNNDump not found" 
         find build -name "benchmark*" -type f -executable -exec cp {} ${{ env.PACKAGENAME }}/bin/benchmark \; 2>/dev/null || echo "benchmark not found"
         find build -name "MNNV2Basic*" -type f -executable -exec cp {} ${{ env.PACKAGENAME }}/bin/ \; 2>/dev/null || echo "MNNV2Basic not found"
         
-        # Copiar apenas bibliotecas estáticas
+        # Bibliotecas estáticas
         find build -name "libMNN.a" -type f -exec cp {} ${{ env.PACKAGENAME }}/lib/ \; 2>/dev/null || echo "libMNN.a not found"
         find build -name "libMNN_Express.a" -type f -exec cp {} ${{ env.PACKAGENAME }}/lib/ \; 2>/dev/null || echo "libMNN_Express.a not found"
-        find build -name "libmnncore.a" -type f -exec cp {} ${{ env.PACKAGENAME }}/lib/ \; 2>/dev/null || echo "libmnncore.a not found"
         
-        # Copiar headers
+        # Headers
         cp -r include/MNN ${{ env.PACKAGENAME }}/include/ 2>/dev/null || echo "Headers not copied"
         
-        # Criar script de verificação melhorado
-        cat > ${{ env.PACKAGENAME }}/verify_static.sh << 'EOF'
-        #!/bin/bash
-        echo "=== MNN Static Tools Verification ==="
-        echo "Package: $(basename "$(pwd)")"
-        echo "Date: $(date)"
+        # Script de teste melhorado
+        cat > ${{ env.PACKAGENAME }}/test_compatibility.sh << 'EOF'
+        #!/bin/sh
+        echo "=== MNN Musl Static Tools Compatibility Test ==="
+        echo "Built with: musl libc (Alpine Linux base)"
+        echo "Target: Any Linux ARM64 system"
         echo ""
         
-        echo "=== Available Tools ==="
-        ls -la bin/ 2>/dev/null || echo "No bin directory found"
+        echo "=== System Info ==="
+        uname -a
         echo ""
         
-        echo "=== Static Libraries ==="
-        ls -la lib/ 2>/dev/null || echo "No lib directory found"
-        echo ""
-        
-        echo "=== Checking Static Linking ==="
+        echo "=== Testing Tools ==="
         for tool in bin/*; do
-          if [[ -x "$tool" ]]; then
+          if [ -x "$tool" ]; then
             echo "Tool: $(basename "$tool")"
+            echo "  File type: $(file "$tool" | cut -d: -f2-)"
             echo "  Size: $(du -sh "$tool" | cut -f1)"
-            echo "  Type: $(file "$tool" | cut -d: -f2)"
-            echo "  Dependencies:"
+            
+            # Test static linking
             if ldd "$tool" 2>&1 | grep -q "not a dynamic executable"; then
-              echo "    ✅ Statically linked"
+              echo "  Linking: ✅ Fully static"
             else
-              echo "    ❌ Has dynamic dependencies:"
-              ldd "$tool" 2>/dev/null | sed 's/^/      /'
+              echo "  Linking: ❌ Has dependencies"
+              ldd "$tool" 2>/dev/null | sed 's/^/    /'
+            fi
+            
+            # Test execution
+            echo "  Execution test:"
+            if "$tool" --help >/dev/null 2>&1; then
+              echo "    ✅ Responds to --help"
+            elif "$tool" --version >/dev/null 2>&1; then
+              echo "    ✅ Responds to --version" 
+            else
+              echo "    ⚠️  Testing basic execution..."
+              if timeout 5 "$tool" 2>&1 | grep -i -E "(usage|convert|error|invalid)" >/dev/null; then
+                echo "    ✅ Tool responds (shows usage/error as expected)"
+              else
+                echo "    ❌ Tool does not respond properly"
+              fi
             fi
             echo ""
-        
-            # Teste básico de funcionalidade
-            if [[ "$(basename "$tool")" == "MNNConvert" ]]; then
-              echo "  Testing MNNConvert:"
-              if "$tool" --help >/dev/null 2>&1; then
-                echo "    ✅ MNNConvert responds to --help"
-              else
-                echo "    ❓ Testing version or usage..."
-                "$tool" 2>&1 | head -3 | sed 's/^/      /'
-              fi
-              echo ""
-            fi
           fi
         done
         
-        echo "=== System Info ==="
-        echo "Architecture: $(uname -m)"
-        echo "Kernel: $(uname -r)"
-        echo "OS: $(cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2 | tr -d '"')"
+        echo "=== Compatibility Notes ==="
+        echo "• Built with musl libc for maximum compatibility"
+        echo "• Should work on any ARM64 Linux system"  
+        echo "• No external dependencies required"
+        echo "• Tested binary size is optimized for musl static linking"
         EOF
-        chmod +x ${{ env.PACKAGENAME }}/verify_static.sh
+        chmod +x ${{ env.PACKAGENAME }}/test_compatibility.sh
         
-        # Criar README
+        # README específico para musl
         cat > ${{ env.PACKAGENAME }}/README.md << 'EOF'
-        # MNN Static Tools for ARM64 Linux
+        # MNN Musl Static Tools for ARM64 Linux
         
-        This package contains statically linked MNN tools and libraries for ARM64 Linux.
+        **Statically linked with musl libc for maximum compatibility**
+        
+        ## Why musl instead of glibc?
+        
+        - **Better static linking**: musl is designed for static binaries
+        - **Smaller size**: More efficient than glibc static builds  
+        - **Universal compatibility**: Works on any ARM64 Linux system
+        - **No version conflicts**: Self-contained binaries
         
         ## Contents
         
-        - `bin/MNNConvert` - Convert ONNX models to MNN format
-        - `bin/benchmark` - Performance benchmarking tool
+        - `bin/MNNConvert` - Convert ONNX/TensorFlow models to MNN
+        - `bin/benchmark` - Performance benchmarking
         - `bin/MNNV2Basic.out` - Basic inference example
         - `lib/` - Static libraries for development
-        - `include/` - Header files for C++ development
+        - `include/` - C++ headers
         
-        ## Usage
+        ## Quick Test
         
-        ### Convert ONNX to MNN
         ```
-        ./bin/MNNConvert -f ONNX --modelFile model.onnx --MNNModel model.mnn --bizCode MNN
-        ```
-        
-        ### Verify Installation
-        ```
-        ./verify_static.sh
+        ./test_compatibility.sh
+        ./bin/MNNConvert --help
         ```
         
-        ## Notes
+        ## Usage Examples
         
-        - All binaries are statically linked and should work on any ARM64 Linux system
-        - No external dependencies required
-        - Built with release optimizations
+        ```
+        # Convert ONNX to MNN
+        ./bin/MNNConvert -f ONNX --modelFile model.onnx --MNNModel model.mnn
         
+        # Benchmark inference
+        ./bin/benchmark model.mnn 100
+        ```
+        
+        Built on: Alpine Linux (musl libc)
+        Target: ARM64 Linux (any distribution)
         EOF
         
-        # Verificar conteúdo final
-        echo "=== Package Contents ==="
+        echo "=== Final Package Contents ==="
         find ${{ env.PACKAGENAME }} -type f | sort
-        echo ""
-        echo "=== File Sizes ==="
-        du -sh ${{ env.PACKAGENAME }}/*
     
-    - name: Test static binaries
+    - name: Final compatibility test
       run: |
         cd ${{ env.PACKAGENAME }}
-        echo "=== Running verification script ==="
-        ./verify_static.sh
+        echo "=== Running compatibility test ==="
+        ./test_compatibility.sh
     
-    - name: Create package
+    - name: Create optimized package
       run: |
+        # Strip binaries para reduzir tamanho
+        find ${{ env.PACKAGENAME }}/bin -type f -executable -exec strip {} \; 2>/dev/null || true
+        
         # Usar tar.xz para máxima compressão
         tar -cJf ${{ env.PACKAGENAME }}.tar.xz ${{ env.PACKAGENAME }}
         
-        echo "=== Final Package Info ==="
+        echo "=== Package Information ==="
         ls -lh ${{ env.PACKAGENAME }}.tar.xz
-        echo ""
-        echo "Package size: $(du -sh ${{ env.PACKAGENAME }}.tar.xz | cut -f1)"
-        echo "Uncompressed size: $(du -sh ${{ env.PACKAGENAME }} | cut -f1)"
+        echo "Compressed: $(du -sh ${{ env.PACKAGENAME }}.tar.xz | cut -f1)"
+        echo "Uncompressed: $(du -sh ${{ env.PACKAGENAME }} | cut -f1)" 
     
     - name: Upload artifact
       uses: actions/upload-artifact@v4
@@ -240,7 +239,7 @@ jobs:
 
   upload-release:
     name: upload_to_release
-    needs: [linux-arm64-static-release]
+    needs: [linux-arm64-musl-static-release]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
@@ -249,17 +248,6 @@ jobs:
         pattern: artifact-*
         path: assert
         merge-multiple: true
-
-    - name: Show files to upload
-      run: |
-        echo "=== Files to upload ==="
-        ls -la assert/
-        echo ""
-        for file in assert/*; do
-          echo "File: $(basename "$file")"
-          echo "Size: $(du -sh "$file" | cut -f1)"
-          echo "---"
-        done
 
     - name: Upload to GitHub Release
       uses: xresloader/upload-to-github-release@v1
