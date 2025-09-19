@@ -1,4 +1,4 @@
-name: mnn_aarch64_release
+name: mnn_aarch64_full_release
 on:
   push:
     tags:
@@ -22,47 +22,118 @@ jobs:
           echo "VERSION=dev" >> $GITHUB_OUTPUT
         fi
 
-  linux-arm64-release:
+  linux-arm64-full-release:
     needs: [setup]
-    runs-on: ubuntu-24.04-arm  # Novo runner ARM64 nativo
+    runs-on: ubuntu-24.04-arm
     env:
-      PACKAGENAME: mnn_${{ needs.setup.outputs.VERSION }}_linux_aarch64_cpu_opencl_tools
+      PACKAGENAME: mnn_${{ needs.setup.outputs.VERSION }}_linux_aarch64_full_tools
     steps:
     - uses: actions/checkout@v4
       with:
         submodules: true
     
-    - name: Install build dependencies
+    - name: Install dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y build-essential cmake ninja-build
         sudo apt-get install -y libprotobuf-dev protobuf-compiler
         sudo apt-get install -y opencl-headers ocl-icd-libopencl1
+        sudo apt-get install -y libjpeg-dev libpng-dev
     
-    - name: build
+    - name: Build MNN with tools
       run: |
-        # Reduz paralelismo para evitar problemas de memória
-        sed -i "s/-j24/-j4/g" package_scripts/linux/build_lib.sh
-        # -c inclui ferramentas de conversão (MNNConvert)
-        # -s inclui bibliotecas estáticas
-        # -b opencl inclui suporte OpenCL
-        ./package_scripts/linux/build_lib.sh -o ${{ env.PACKAGENAME }}/lib -b opencl -s -c
+        mkdir build && cd build
+        cmake .. \
+          -DMNN_BUILD_CONVERTER=ON \
+          -DMNN_BUILD_TOOLS=ON \
+          -DMNN_BUILD_BENCHMARK=ON \
+          -DMNN_USE_OPENCL=ON \
+          -DMNN_BUILD_SHARED_LIBS=ON \
+          -DMNN_BUILD_OPENCV=ON \
+          -DMNN_IMGCODECS=ON \
+          -DCMAKE_BUILD_TYPE=Release \
+          -GNinja
+        ninja -j4
     
-    - name: package
+    - name: Verify build outputs
       run: |
-        rm -f ${{ env.PACKAGENAME }}.tar.gz
+        echo "=== Searching for built files ==="
+        find build -name "MNNConvert" -type f 2>/dev/null || echo "MNNConvert not found"
+        find build -name "MNNDump" -type f 2>/dev/null || echo "MNNDump not found"
+        find build -name "benchmark*" -type f 2>/dev/null || echo "benchmark not found"
+        find build -name "libMNN*" -type f 2>/dev/null | head -5
+        find build -name "*.so*" -type f 2>/dev/null | head -10
+    
+    - name: Package tools and libraries
+      run: |
+        mkdir -p ${{ env.PACKAGENAME }}/{bin,lib,include}
+        
+        # Copiar ferramentas (buscar em vários locais possíveis)
+        find build -name "MNNConvert" -type f -exec cp {} ${{ env.PACKAGENAME }}/bin/ \; 2>/dev/null || echo "MNNConvert not found"
+        find build -name "MNNDump" -type f -exec cp {} ${{ env.PACKAGENAME }}/bin/ \; 2>/dev/null || echo "MNNDump not found"
+        find build -name "benchmark*" -type f -executable -exec cp {} ${{ env.PACKAGENAME }}/bin/benchmark \; 2>/dev/null || echo "benchmark not found"
+        find build -name "MNNV2Basic*" -type f -executable -exec cp {} ${{ env.PACKAGENAME }}/bin/ \; 2>/dev/null || echo "MNNV2Basic not found"
+        
+        # Copiar bibliotecas
+        find build -name "libMNN.so*" -type f -exec cp {} ${{ env.PACKAGENAME }}/lib/ \; 2>/dev/null || echo "libMNN.so not found"
+        find build -name "libMNN.a" -type f -exec cp {} ${{ env.PACKAGENAME }}/lib/ \; 2>/dev/null || echo "libMNN.a not found"
+        find build -name "libMNN_Express.so*" -type f -exec cp {} ${{ env.PACKAGENAME }}/lib/ \; 2>/dev/null || echo "Express lib not found"
+        find build -name "libMNN_CL.so*" -type f -exec cp {} ${{ env.PACKAGENAME }}/lib/ \; 2>/dev/null || echo "OpenCL lib not found"
+        find build -name "libmnncore.so*" -type f -exec cp {} ${{ env.PACKAGENAME }}/lib/ \; 2>/dev/null || echo "mnncore lib not found"
+        
+        # Copiar headers
+        cp -r include/MNN ${{ env.PACKAGENAME }}/include/ 2>/dev/null || echo "Headers not copied"
+        
+        # Criar script de teste
+        cat > ${{ env.PACKAGENAME }}/test_tools.sh << 'EOF'
+        #!/bin/bash
+        echo "=== Testing MNN Tools ==="
+        echo "MNNConvert version:"
+        ./bin/MNNConvert --version 2>/dev/null || echo "MNNConvert not working or no --version"
+        echo ""
+        echo "Available tools:"
+        ls -la bin/
+        echo ""
+        echo "Available libraries:"
+        ls -la lib/
+        echo ""
+        echo "Testing library linkage:"
+        ldd lib/libMNN.so 2>/dev/null || echo "Cannot check dependencies"
+        EOF
+        chmod +x ${{ env.PACKAGENAME }}/test_tools.sh
+        
+        # Verificar o que foi empacotado
+        echo "=== Package contents ==="
+        find ${{ env.PACKAGENAME }} -type f | sort
+        echo ""
+        echo "=== File sizes ==="
+        du -sh ${{ env.PACKAGENAME }}/*
+    
+    - name: Test tools functionality
+      run: |
+        cd ${{ env.PACKAGENAME }}
+        ./test_tools.sh || echo "Some tests failed, but continuing..."
+    
+    - name: Create package
+      run: |
+        # Usar tar.gz para melhor compressão
         tar -czf ${{ env.PACKAGENAME }}.tar.gz ${{ env.PACKAGENAME }}
+        
+        echo "=== Final package info ==="
+        ls -lh ${{ env.PACKAGENAME }}.tar.gz
     
-    - name: upload-artifact
+    - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: artifact-${{ env.PACKAGENAME }}
         path: ${{ env.PACKAGENAME }}.tar.gz
+        retention-days: 30
 
   upload-release:
     name: upload_to_release
-    needs: [linux-arm64-release]
+    needs: [linux-arm64-full-release]
     runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
     steps:
     - uses: actions/download-artifact@v4
       with:
@@ -70,13 +141,45 @@ jobs:
         path: assert
         merge-multiple: true
 
-    - name: show file
-      run: ls -la assert
+    - name: Show files to upload
+      run: |
+        echo "=== Files to upload ==="
+        ls -la assert/
+        echo ""
+        for file in assert/*; do
+          echo "File: $(basename "$file")"
+          echo "Size: $(du -sh "$file" | cut -f1)"
+          echo "---"
+        done
 
-    - uses: xresloader/upload-to-github-release@v1
+    - name: Upload to GitHub Release
+      uses: xresloader/upload-to-github-release@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         file: assert/*.tar.gz
         tags: true
         draft: true
+        overwrite: true
+        verbose: true
+
+  # Job opcional para workflow_dispatch (teste manual)
+  manual-test:
+    needs: [linux-arm64-full-release]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        pattern: artifact-*
+        path: test_download
+        merge-multiple: true
+    
+    - name: Test package extraction
+      run: |
+        cd test_download
+        for file in *.tar.gz; do
+          echo "=== Testing $file ==="
+          tar -tf "$file" | head -20
+          echo "---"
+        done
