@@ -1,0 +1,82 @@
+name: mnn_aarch64_release
+on:
+  push:
+    tags:
+      - '*'
+  workflow_dispatch:
+
+jobs:
+  setup:
+    permissions:
+      contents: none
+    runs-on: ubuntu-latest
+    outputs:
+      VERSION: ${{ steps.get_version.outputs.VERSION }}
+    steps:
+    - name: get-version
+      id: get_version
+      run: |
+        if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+          echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+        else
+          echo "VERSION=dev" >> $GITHUB_OUTPUT
+        fi
+
+  linux-arm64-release:
+    needs: [setup]
+    runs-on: ubuntu-24.04-arm64  # Novo runner ARM64 nativo
+    env:
+      PACKAGENAME: mnn_${{ needs.setup.outputs.VERSION }}_linux_aarch64_cpu_opencl_tools
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: true
+    
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential cmake ninja-build
+        sudo apt-get install -y libprotobuf-dev protobuf-compiler
+        sudo apt-get install -y opencl-headers ocl-icd-libopencl1
+    
+    - name: build
+      run: |
+        # Reduz paralelismo para evitar problemas de memória
+        sed -i "s/-j24/-j4/g" package_scripts/linux/build_lib.sh
+        # -c inclui ferramentas de conversão (MNNConvert)
+        # -s inclui bibliotecas estáticas
+        # -b opencl inclui suporte OpenCL
+        ./package_scripts/linux/build_lib.sh -o ${{ env.PACKAGENAME }}/lib -b opencl -s -c
+    
+    - name: package
+      run: |
+        rm -f ${{ env.PACKAGENAME }}.tar.gz
+        tar -czf ${{ env.PACKAGENAME }}.tar.gz ${{ env.PACKAGENAME }}
+    
+    - name: upload-artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: artifact-${{ env.PACKAGENAME }}
+        path: ${{ env.PACKAGENAME }}.tar.gz
+
+  upload-release:
+    name: upload_to_release
+    needs: [linux-arm64-release]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        pattern: artifact-*
+        path: assert
+        merge-multiple: true
+
+    - name: show file
+      run: ls -la assert
+
+    - uses: xresloader/upload-to-github-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        file: assert/*.tar.gz
+        tags: true
+        draft: true
